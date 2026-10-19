@@ -1,17 +1,21 @@
-import time
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import time, os
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"SMC BOT ONLINE 24/7 - LIVE")
+
+def run_server():
+    port = int(os.environ.get("PORT", 10000))
+    HTTPServer(("0.0.0.0", port), Handler).serve_forever()
+
+threading.Thread(target=run_server, daemon=True).start()
 
 print("=== SMC BOT STARTED ===")
-print("4H: Checking trend with EMA 50/200")
-print("1H: Scanning for liquidity sweep")
-print("15M: Waiting for BOS / CHoCH")
-print("5M: Waiting for Order Block entry")
-print("Bot will run 24/7 even when phone is OFF")
-
+print("BOT ONLINE 24/7")
 while True:
-    print("--- SMC Scan ---")
-    print("4H Trend: BULLISH check (Price > EMA200)")
-    print("1H: Checking equal highs/lows liquidity")
-    print("15M: Waiting for Break of Structure")
-    print("5M: Standing by for entry")
-    print("Next scan in 5 min...")
-    time.sleep(300)
+    print("SMC Scan running...")
+    time.sleep(10)
