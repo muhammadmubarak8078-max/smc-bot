@@ -1,64 +1,110 @@
-import threading, time, os, requests
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import yfinance as yf
-import pandas as pd
+import os, time, requests, yfinance as yf, pandas as pd
+from flask import Flask
+from threading import Thread
+from datetime import datetime
 
-# === CONFIG ===
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "7999441123:AAFZwyNSg42we8dMYr9HLi24oVcd--q7Fgc")
-CHAT_ID = os.environ.get("CHAT_ID", "")
-SYMBOL = "GC=F"  # XAUUSD Gold - change to EURUSD=X or BTC-USD if you want
-TIMEFRAME = "15m"
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"SMC GOLD BOT ONLINE 24/7 - LIVE")
+SYMBOLS = {"XAUUSD": "GC=F", "BTCUSD": "BTC-USD"}
+TFS = ["15m", "1h", "4h"]
 
-def run_server():
-    port = int(os.environ.get("PORT", 10000))
-    HTTPServer(("0.0.0.0", port), Handler).serve_forever()
+app = Flask(__name__)
 
-threading.Thread(target=run_server, daemon=True).start()
+@app.route('/')
+def home():
+    return "SMC PRO LIVE - XAUUSD + BTC"
 
-def send_telegram(msg):
+def send(msg):
     try:
-        if not CHAT_ID: return
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
-    except Exception as e:
-        print(e)
+        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
+    except:
+        pass
 
-def check_smc():
+def get_data(ticker, tf):
     try:
-        df = yf.download(SYMBOL, period="5d", interval=TIMEFRAME)
-        if len(df) < 200: return
-        df['EMA50'] = df['Close'].ewm(span=50).mean()
-        df['EMA200'] = df['Close'].ewm(span=200).mean()
-        
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
-        
-        # SMC Logic: EMA Trend + Sweep + CHoCH
-        bullish_trend = last['EMA50'] > last['EMA200']
-        bullish_choch = last['Close'] > prev['Close'] and last['Close'] > last['EMA50']
-        
-        # Liquidity sweep: low wick below recent low then close above
-        recent_low = df['Low'].iloc[-20:-1].min()
-        sweep = last['Low'] < recent_low and last['Close'] > recent_low
-        
-        print(f"Scan {SYMBOL}: Close={float(last['Close']):.2f} EMA50={float(last['EMA50']):.2f} TrendBull={bullish_trend} Sweep={sweep}")
-        
-        if bullish_trend and bullish_choch and sweep:
-            msg = f"🚀 SMC BUY SIGNAL\nSymbol: {SYMBOL}\nPrice: {float(last['Close']):.2f}\nTimeframe: {TIMEFRAME}\nSetup: Sweep + CHoCH + EMA Bullish\nhttps://smc-bot-i2jt.onrender.com"
-            send_telegram(msg)
-            print("ALERT SENT!")
-    except Exception as e:
-        print(f"Error: {e}")
+        per = "2d" if tf == "15m" else "7d" if tf == "1h" else "30d"
+        df = yf.download(ticker, interval=tf, period=per, progress=False)
+        if len(df) < 50:
+            return None
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        return df.dropna()
+    except:
+        return None
 
-print("=== REAL SMC BOT STARTED ===")
-send_telegram("✅ SMC Bot is now LIVE 24/7 on Render! Scanning Gold (XAUUSD) every 2 mins.")
+def scan_symbol(df):
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    third = df.iloc[-3]
+    rh = df["High"].tail(20).max()
+    rl = df["Low"].tail(20).min()
 
-while True:
-    check_smc()
-    time.sleep(120)  # scan every 2 minutes
+    bull_bos = last["Close"] > rh
+    bear_bos = last["Close"] < rl
+
+    ob_bull = last["Close"] > last["Open"] and prev["Close"] < prev["Open"]
+    ob_bear = last["Close"] < last["Open"] and prev["Close"] > prev["Open"]
+
+    bull_fvg = last["Low"] > third["High"]
+    bear_fvg = last["High"] < third["Low"]
+
+    sweep_h = last["High"] > rh and last["Close"] < rh
+    sweep_l = last["Low"] < rl and last["Close"] > rl
+
+    conf = 0
+    reasons = []
+    if bull_bos:
+        conf += 40
+        reasons.append("BOS Bull")
+    if bear_bos:
+        conf += 40
+        reasons.append("BOS Bear")
+    if ob_bull:
+        conf += 20
+        reasons.append("Bull OB")
+    if ob_bear:
+        conf += 20
+        reasons.append("Bear OB")
+    if bull_fvg:
+        conf += 20
+        reasons.append("Bull FVG")
+    if bear_fvg:
+        conf += 20
+        reasons.append("Bear FVG")
+    if sweep_l:
+        conf += 15
+        reasons.append("Sweep Low")
+    if sweep_h:
+        conf += 15
+        reasons.append("Sweep High")
+
+    sig = None
+    if bull_bos and (ob_bull or bull_fvg or sweep_l) and conf >= 60:
+        sig = "BUY"
+    if bear_bos and (ob_bear or bear_fvg or sweep_h) and conf >= 60:
+        sig = "SELL"
+
+    return sig, conf, reasons, float(last["Close"])
+
+def scanner():
+    send("🚀 *SMC PRO STARTED*\nXAUUSD + BTCUSD\nTF: 15m, 1h, 4h\nBOS + OB + FVG + Liquidity")
+    while True:
+        for name, ticker in SYMBOLS.items():
+            for tf in TFS:
+                df = get_data(ticker, tf)
+                if df is None:
+                    continue
+                sig, conf, reas, price = scan_symbol(df)
+                if sig:
+                    r = " + ".join(reas)
+                    msg = f"🔥 *{name} {sig}* 🔥\nTF: {tf}\nPrice: {price:.2f}\nConf: {conf}%\nSetup: {r}\nTime: {datetime.now().strftime('%H:%M UTC')}"
+                    send(msg)
+                    time.sleep(5)
+        time.sleep(900)
+
+Thread(target=scanner, daemon=True).start()
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
