@@ -75,4 +75,33 @@ def set_webhook():
 def webhook():
     try:
         upd = request.get_json(force=True)
-        msg = upd.get("message
+        msg = upd.get("message", {})
+        text = msg.get("text","").strip()
+        cid = msg.get("chat",{}).get("id")
+        print(f"RECV: {text}")
+        if text.lower()=="/start":
+            send("🚀 *SMC PRO AUTO+MANUAL LIVE!*\n\nI go dey alert you every 15 mins automatically!\n\nYou fit still send:\n`/signal XAUUSD`\n`/signal BTCUSD`\n`/signal EURUSD`", cid)
+        elif text.lower().startswith("/signal"):
+            sym = text.split()[-1].upper() if len(text.split())>1 else ""
+            if sym not in SYMBOLS:
+                send(f"Use: /signal XAUUSD or EURUSD etc", cid)
+            else:
+                send(f"⏳ Scanning {sym}... wait 20 sec", cid)
+                for tf in TFS:
+                    df=get_data(SYMBOLS[sym], tf)
+                    if df is None: continue
+                    sig,conf=scan_symbol(df)
+                    if sig:
+                        send(f"🔥 *{sym} {sig} {tf} - {conf}%*", cid)
+                    else:
+                        send(f"ℹ️ {sym} {tf}: No setup", cid)
+        return "ok"
+    except Exception as e:
+        print(f"ERR {e}")
+        return "ok"
+
+Thread(target=set_webhook, daemon=True).start()
+Thread(target=auto_scanner, daemon=True).start()
+
+if __name__=="__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT",10000)))
