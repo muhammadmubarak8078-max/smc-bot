@@ -1,4 +1,3 @@
-
 import os, time, requests, yfinance as yf, pandas as pd
 from flask import Flask
 from threading import Thread
@@ -14,12 +13,13 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "SMC PRO LIVE - 6 PAIRS: XAUUSD BTCUSD EURUSD GBPUSD NZDUSD USDJPY"
+    return "SMC PRO LIVE - 6 PAIRS: XAUUSD BTCUSD EURUSD GBPUSD NZDUSD USDJPY - COMMAND BOT ACTIVE"
 
-def send(msg):
+def send(msg, chat_id=None):
     try:
+        cid = chat_id or CHAT_ID
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
+        requests.post(url, data={"chat_id": cid, "text": msg, "parse_mode": "Markdown"}, timeout=10)
     except:
         pass
 
@@ -41,19 +41,14 @@ def scan_symbol(df):
     third = df.iloc[-3]
     rh = df["High"].tail(20).max()
     rl = df["Low"].tail(20).min()
-
     bull_bos = last["Close"] > rh
     bear_bos = last["Close"] < rl
-
     ob_bull = last["Close"] > last["Open"] and prev["Close"] < prev["Open"]
     ob_bear = last["Close"] < last["Open"] and prev["Close"] > prev["Open"]
-
     bull_fvg = last["Low"] > third["High"]
     bear_fvg = last["High"] < third["Low"]
-
     sweep_h = last["High"] > rh and last["Close"] < rh
     sweep_l = last["Low"] < rl and last["Close"] > rl
-
     conf = 0
     reasons = []
     if bull_bos:
@@ -80,17 +75,15 @@ def scan_symbol(df):
     if sweep_h:
         conf += 15
         reasons.append("Sweep High")
-
     sig = None
     if bull_bos and (ob_bull or bull_fvg or sweep_l) and conf >= 60:
         sig = "BUY"
     if bear_bos and (ob_bear or bear_fvg or sweep_h) and conf >= 60:
         sig = "SELL"
-
     return sig, conf, reasons, float(last["Close"])
 
 def scanner():
-    send("🚀 *SMC PRO STARTED*\nXAUUSD + BTCUSD + EURUSD + GBPUSD + NZDUSD + USDJPY\nTF: 15m, 1h, 4h\nBOS + OB + FVG + Liquidity")
+    send("🚀 *SMC PRO STARTED - COMMAND BOT*\nPairs: XAUUSD + BTCUSD + EURUSD + GBPUSD + NZDUSD + USDJPY\nTF: 15m, 1h, 4h\n\nCommands:\n/start - Show status\n/signal EURUSD - Scan now\nBOS + OB + FVG + Liquidity")
     while True:
         for name, ticker in SYMBOLS.items():
             for tf in TFS:
@@ -105,7 +98,47 @@ def scanner():
                     time.sleep(5)
         time.sleep(900)
 
+def command_handler():
+    offset = 0
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={offset}&timeout=20"
+            resp = requests.get(url, timeout=25).json()
+            for upd in resp.get("result", []):
+                offset = upd["update_id"] + 1
+                msg = upd.get("message", {})
+                text = msg.get("text", "").strip()
+                cid = msg.get("chat", {}).get("id")
+                if not text or not cid:
+                    continue
+                if text.lower() == "/start":
+                    send("🚀 *SMC PRO 6 PAIRS LIVE!*\n\n✅ XAUUSD\n✅ BTCUSD\n✅ EURUSD\n✅ GBPUSD\n✅ NZDUSD\n✅ USDJPY\n\nTF: 15m, 1h, 4h\nStrategy: BOS + OB + FVG + Liquidity\n\nUse:\n/signal EURUSD\n/signal XAUUSD\n/signal BTCUSD\netc.", cid)
+                elif text.lower().startswith("/signal"):
+                    parts = text.split()
+                    if len(parts) < 2:
+                        send("Use: /signal EURUSD\nExample: /signal XAUUSD", cid)
+                    else:
+                        sym = parts[1].upper()
+                        if sym not in SYMBOLS:
+                            send(f"❌ {sym} not found. Available: {', '.join(SYMBOLS.keys())}", cid)
+                        else:
+                            send(f"⏳ Scanning *{sym}*...", cid)
+                            for tf in TFS:
+                                df = get_data(SYMBOLS[sym], tf)
+                                if df is None:
+                                    continue
+                                sig, conf, reas, price = scan_symbol(df)
+                                if sig:
+                                    r = " + ".join(reas)
+                                    send(f"🔥 *{sym} {sig}* 🔥\nTF: {tf}\nPrice: {price:.2f}\nConf: {conf}%\nSetup: {r}", cid)
+                                else:
+                                    send(f"ℹ️ *{sym}* {tf}: No setup (Waiting BOS+OB/FVG)", cid)
+                                time.sleep(2)
+        except:
+            time.sleep(5)
+
 Thread(target=scanner, daemon=True).start()
+Thread(target=command_handler, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
