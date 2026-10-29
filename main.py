@@ -1,9 +1,9 @@
 import os, time, requests, yfinance as yf, pandas as pd
-from flask import Flask
+from flask import Flask, request
 from threading import Thread
 from datetime import datetime
 
-TOKEN = os.getenv("TELEGRAM_TOKEN")
+TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN") or os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 SYMBOLS = {"XAUUSD": "GC=F", "BTCUSD": "BTC-USD", "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "NZDUSD": "NZDUSD=X", "USDJPY": "USDJPY=X"}
@@ -13,26 +13,31 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "SMC PRO LIVE - 6 PAIRS: XAUUSD BTCUSD EURUSD GBPUSD NZDUSD USDJPY - COMMAND BOT ACTIVE"
+    return f"SMC PRO LIVE - TOKEN OK: {bool(TOKEN)} - CHAT OK: {bool(CHAT_ID)} - 16:09"
 
 def send(msg, chat_id=None):
     try:
         cid = chat_id or CHAT_ID
+        if not TOKEN or not cid:
+            print(f"SEND FAIL: TOKEN={bool(TOKEN)} CID={cid}")
+            return
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": cid, "text": msg, "parse_mode": "Markdown"}, timeout=10)
-    except:
-        pass
+        r = requests.post(url, data={"chat_id": cid, "text": msg, "parse_mode": "Markdown"}, timeout=10)
+        print(f"SEND RESP: {r.text[:200]}")
+    except Exception as e:
+        print(f"SEND ERR: {e}")
 
 def get_data(ticker, tf):
     try:
         per = "2d" if tf == "15m" else "7d" if tf == "1h" else "30d"
-        df = yf.download(ticker, interval=tf, period=per, progress=False)
+        df = yf.download(ticker, interval=tf, period=per, progress=False, auto_adjust=True)
         if len(df) < 50:
             return None
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         return df.dropna()
-    except:
+    except Exception as e:
+        print(f"DATA ERR {ticker} {tf}: {e}")
         return None
 
 def scan_symbol(df):
@@ -83,7 +88,10 @@ def scan_symbol(df):
     return sig, conf, reasons, float(last["Close"])
 
 def scanner():
-    send("🚀 *SMC PRO STARTED - COMMAND BOT*\nPairs: XAUUSD + BTCUSD + EURUSD + GBPUSD + NZDUSD + USDJPY\nTF: 15m, 1h, 4h\n\nCommands:\n/start - Show status\n/signal EURUSD - Scan now\nBOS + OB + FVG + Liquidity")
+    print("SCANNER STARTED")
+    time.sleep(10)
+    if CHAT_ID:
+        send("🚀 *SMC PRO STARTED - COMMAND BOT*\nPairs: XAUUSD + BTCUSD + EURUSD + GBPUSD + NZDUSD + USDJPY\nTF: 15m, 1h, 4h")
     while True:
         for name, ticker in SYMBOLS.items():
             for tf in TFS:
@@ -100,15 +108,25 @@ def scanner():
 
 def command_handler():
     offset = 0
+    print(f"COMMAND HANDLER STARTED TOKEN={bool(TOKEN)}")
     while True:
         try:
+            if not TOKEN:
+                print("NO TOKEN - WAITING 10s")
+                time.sleep(10)
+                continue
             url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={offset}&timeout=20"
             resp = requests.get(url, timeout=25).json()
+            if not resp.get("ok"):
+                print(f"GETUPDATES FAIL: {resp}")
+                time.sleep(5)
+                continue
             for upd in resp.get("result", []):
                 offset = upd["update_id"] + 1
                 msg = upd.get("message", {})
                 text = msg.get("text", "").strip()
                 cid = msg.get("chat", {}).get("id")
+                print(f"RECV: {text} from {cid}")
                 if not text or not cid:
                     continue
                 if text.lower() == "/start":
@@ -134,7 +152,8 @@ def command_handler():
                                 else:
                                     send(f"ℹ️ *{sym}* {tf}: No setup (Waiting BOS+OB/FVG)", cid)
                                 time.sleep(2)
-        except:
+        except Exception as e:
+            print(f"CMD LOOP ERR: {e}")
             time.sleep(5)
 
 Thread(target=scanner, daemon=True).start()
