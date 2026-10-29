@@ -1,3 +1,4 @@
+
 import os, time, requests, yfinance as yf, pandas as pd
 from flask import Flask
 from threading import Thread
@@ -6,14 +7,14 @@ from datetime import datetime
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-SYMBOLS = {"XAUUSD": "GC=F", "BTCUSD": "BTC-USD"}
+SYMBOLS = {"XAUUSD": "GC=F", "BTCUSD": "BTC-USD", "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "NZDUSD": "NZDUSD=X", "USDJPY": "USDJPY=X"}
 TFS = ["15m", "1h", "4h"]
 
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "SMC PRO LIVE - XAUUSD + BTC"
+    return "SMC PRO LIVE - 6 PAIRS: XAUUSD BTCUSD EURUSD GBPUSD NZDUSD USDJPY"
 
 def send(msg):
     try:
@@ -89,7 +90,7 @@ def scan_symbol(df):
     return sig, conf, reasons, float(last["Close"])
 
 def scanner():
-    send("🚀 *SMC PRO STARTED*\nXAUUSD + BTCUSD\nTF: 15m, 1h, 4h\nBOS + OB + FVG + Liquidity")
+    send("🚀 *SMC PRO STARTED*\nXAUUSD + BTCUSD + EURUSD + GBPUSD + NZDUSD + USDJPY\nTF: 15m, 1h, 4h\nBOS + OB + FVG + Liquidity")
     while True:
         for name, ticker in SYMBOLS.items():
             for tf in TFS:
