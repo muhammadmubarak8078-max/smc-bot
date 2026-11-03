@@ -20,7 +20,7 @@ BEARISH_WORDS = ["fall", "drop", "bearish", "crash", "decline", "weak", "dovish"
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return f"SMC AI + NEWS LIVE - {datetime.now()}"
+    return f"SMC AI + NEWS + SLTP LIVE - {datetime.now()}"
 
 def send(msg, chat_id=None):
     try:
@@ -53,8 +53,7 @@ def get_news_ai(sym):
             for n in news[:5]:
                 title = ""
                 if isinstance(n, dict):
-                    title = n.get("title", "") or n.get("providerPublishTime", "")
-                    # new yfinance format
+                    title = n.get("title", "")
                     if "content" in n and isinstance(n["content"], dict):
                         title = n["content"].get("title", title)
                 if title:
@@ -81,6 +80,37 @@ def get_news_ai(sym):
     except Exception as e:
         print(f"NEWS ERR {e}")
         return [], "⚪ NEWS UNKNOWN", "News unavailable", False, ""
+
+# --- NEW: CALCULATE SL / TP ---
+def calc_sltp(df, sig, entry):
+    # Use recent swing for SMC SL
+    swing_low = float(df["Low"].tail(20).min())
+    swing_high = float(df["High"].tail(20).max())
+    # For XAUUSD / BTC need bigger buffer, for Forex smaller
+    # Use ATR-like buffer = 0.15% of price
+    buffer = entry * 0.0015
+
+    if sig == "BUY":
+        sl = swing_low - buffer
+        # If SL too far (more than 1.5% away), cap it
+        if entry - sl > entry * 0.015:
+            sl = entry - (entry * 0.008)
+        risk = entry - sl
+        tp1 = entry + risk * 1.5
+        tp2 = entry + risk * 2.5
+        tp3 = entry + risk * 4.0
+        sl_reason = f"SL below sweep low {swing_low:.2f} - if price goes below there, idea is wrong"
+    else: # SELL
+        sl = swing_high + buffer
+        if sl - entry > entry * 0.015:
+            sl = entry + (entry * 0.008)
+        risk = sl - entry
+        tp1 = entry - risk * 1.5
+        tp2 = entry - risk * 2.5
+        tp3 = entry - risk * 4.0
+        sl_reason = f"SL above sweep high {swing_high:.2f} - if price goes above there, idea is wrong"
+
+    return sl, tp1, tp2, tp3, sl_reason, risk
 
 def analyze(df):
     try:
@@ -123,10 +153,12 @@ def analyze(df):
         print(f"ANALYZE ERR {e}")
         return None, [], ["❌ Analysis error"], "UNKNOWN", "UNKNOWN", "UNKNOWN", "UNKNOWN", df.iloc[-1]
 
-def format_full(sym, tf, sig, reasons, no_reasons, trend, liq, bos, fvg, last, news_data):
+def format_full(sym, tf, sig, reasons, no_reasons, trend, liq, bos, fvg, last, news_data, df):
     headlines, bias, bias_text, high_impact, impact_reason = news_data
     price = float(last["Close"])
-    msg = f"🤖 *AI SMC + NEWS - {sym} {tf}*\n\nPrice: {price:.2f}\n\n*📰 NEWS:*\n{bias}\n{bias_text}\n"
+    # Decimals - Gold/BTC 2 decimals, Forex 5 decimals
+    dec = 2 if sym in ["XAUUSD","BTCUSD"] else 5
+    msg = f"🤖 *AI SMC + NEWS - {sym} {tf}*\n\nPrice: {price:.{dec}f}\n\n*📰 NEWS:*\n{bias}\n{bias_text}\n"
     if high_impact: msg += f"\n{impact_reason}\n"
     if headlines: msg += "\n" + "\n".join(headlines[:4]) + "\n\n"
     msg += f"*📊 TECHNICAL:*\nTrend: {trend} | Liq: {liq} | {bos} | {fvg}\n\n"
@@ -134,10 +166,26 @@ def format_full(sym, tf, sig, reasons, no_reasons, trend, liq, bos, fvg, last, n
         msg += "🚫 *NO TRADE* - High impact news. Wait after news.\n"
         return msg
     if sig:
-        msg += f"🔥 *SIGNAL: {sig}*\n*WHY SETUP:*\n" + "\n".join(reasons) + f"\n\nEntry: {price:.2f}"
+        sl, tp1, tp2, tp3, sl_reason, risk = calc_sltp(df, sig, price)
+        emoji = "🟢" if sig=="BUY" else "🔴"
+        msg += f"{emoji} *SIGNAL: {sig}*\n*WHY SETUP:*\n" + "\n".join(reasons) + "\n\n"
+        msg += f"*🎯 TRADE PLAN:*\n"
+        msg += f"Entry: {price:.{dec}f}\n"
+        msg += f"Stop Loss: {sl:.{dec}f}\n"
+        msg += f"TP1 (1:1.5 - Take 50%): {tp1:.{dec}f}\n"
+        msg += f"TP2 (1:2.5 - Take 30%): {tp2:.{dec}f}\n"
+        msg += f"TP3 (1:4 - Runner): {tp3:.{dec}f}\n\n"
+        msg += f"*Why this SL:* {sl_reason}\n"
+        msg += f"*Why these TPs:* TP1 = first liquidity, TP2 = next OB, TP3 = major high/low\n"
+        msg += f"Risk: {risk:.{dec}f} | Risk:Reward up to 1:4\n"
+        msg += f"💡 *Tip:* Move SL to breakeven after TP1 hits."
+        # News conflict warning
+        if sig=="BUY" and "BEARISH" in bias: msg += "\n\n⚠️ Chart BUY but News BEARISH - use small lot."
+        if sig=="SELL" and "BULLISH" in bias: msg += "\n\n⚠️ Chart SELL but News BULLISH - use small lot."
     else:
         msg += "🚫 *NO SETUP*\n*WHY NO SETUP:*\n" + "\n".join(no_reasons)
         if reasons: msg += "\n\n*Good parts:*\n" + "\n".join(reasons)
+        msg += "\n\nNo Entry / No SL / No TP - waiting is also a trade."
     return msg
 
 def auto_scanner():
@@ -150,7 +198,7 @@ def auto_scanner():
                     if df is None: continue
                     sig,reasons,no_reasons,trend,liq,bos,fvg,last = analyze(df)
                     if sig:
-                        send(format_full(sym, tf, sig, reasons, no_reasons, trend, liq, bos, fvg, last, news_data))
+                        send(format_full(sym, tf, sig, reasons, no_reasons, trend, liq, bos, fvg, last, news_data, df))
                         time.sleep(1)
             time.sleep(900)
         except Exception as e:
@@ -170,7 +218,7 @@ def webhook():
         text = msg.get("text","").strip()
         cid = msg.get("chat",{}).get("id")
         if text.lower()=="/start":
-            send("🤖 *SMC AI + NEWS LIVE!*\n\nTry `/signal XAUUSD`\nTry `/news XAUUSD`", cid)
+            send("🤖 *SMC AI + NEWS + SLTP LIVE!*\n\nTry `/signal XAUUSD`\nTry `/news XAUUSD`", cid)
         elif text.lower().startswith("/news"):
             sym = text.split()[-1].upper() if len(text.split())>1 else "XAUUSD"
             if sym in SYMBOLS:
@@ -180,13 +228,13 @@ def webhook():
             sym = text.split()[-1].upper() if len(text.split())>1 else ""
             if sym not in SYMBOLS: send("Use: /signal XAUUSD", cid)
             else:
-                send(f"⏳ AI + News analyzing {sym}...", cid)
+                send(f"⏳ AI analyzing {sym}...", cid)
                 news_data = get_news_ai(sym)
                 for tf in TFS:
                     df=get_data(SYMBOLS[sym], tf)
                     if df is None: continue
                     sig,reasons,no_reasons,trend,liq,bos,fvg,last = analyze(df)
-                    send(format_full(sym, tf, sig, reasons, no_reasons, trend, liq, bos, fvg, last, news_data), cid)
+                    send(format_full(sym, tf, sig, reasons, no_reasons, trend, liq, bos, fvg, last, news_data, df), cid)
         return "ok"
     except Exception as e:
         print(e); return "ok"
