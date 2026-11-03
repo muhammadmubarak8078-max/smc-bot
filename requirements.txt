@@ -3,3 +3,4 @@ yfinance
 pandas
 flask
 python-telegram-bot
+feedparser
