@@ -1,6 +1,6 @@
-requests
+
+flask
 yfinance
 pandas
-flask
-python-telegram-bot
-feedparser
+requests
+gunicorn
