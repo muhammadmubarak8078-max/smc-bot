@@ -2,10 +2,6 @@ import os, time, requests, yfinance as yf, pandas as pd
 from flask import Flask, request
 from threading import Thread
 from datetime import datetime
-try:
-    import feedparser
-except:
-    feedparser = None
 
 TOKEN = (os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN") or os.getenv("TOKEN") or "").strip()
 CHAT_ID = (os.getenv("CHAT_ID") or "").strip()
@@ -20,7 +16,7 @@ BEARISH_WORDS = ["fall", "drop", "bearish", "crash", "decline", "weak", "dovish"
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return f"SMC AI + NEWS + SLTP LIVE - {datetime.now()}"
+    return f"SMC AI + NEWS + SLTP 2.0 LIVE - {datetime.now()}"
 
 def send(msg, chat_id=None):
     try:
@@ -30,16 +26,53 @@ def send(msg, chat_id=None):
     except Exception as e:
         print(f"SEND ERR {e}")
 
+# ==========================================
+# SMC BOT 2.0 - IMPROVED MARKET DATA ENGINE
+# ==========================================
 def get_data(ticker, tf):
     try:
-        per = "2d" if tf=="15m" else "7d" if tf=="1h" else "30d"
-        df = yf.download(ticker, interval=tf, period=per, progress=False, auto_adjust=True)
-        if df is None or len(df)<50: return None
-        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-        return df.dropna()
+        if tf == "15m":
+            df = yf.download(ticker, interval="15m", period="5d", progress=False, auto_adjust=True)
+        elif tf == "1h":
+            df = yf.download(ticker, interval="60m", period="30d", progress=False, auto_adjust=True)
+        elif tf == "4h":
+            df = yf.download(ticker, interval="60m", period="60d", progress=False, auto_adjust=True)
+        else:
+            return None
+        if df is None or df.empty:
+            return None
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        required = ["Open", "High", "Low", "Close", "Volume"]
+        if not all(c in df.columns for c in required):
+            return None
+        df = df[required].copy()
+        df = df[~df.index.duplicated(keep="last")]
+        df = df.dropna()
+        if tf == "4h":
+            df = df.resample("4h").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}).dropna()
+        if len(df) < 60:
+            return None
+        return df
     except Exception as e:
-        print(f"DATA ERR {e}")
+        print(f"DATA ERR {ticker} {tf}: {e}")
         return None
+
+def find_swings(df, left=2, right=2):
+    highs = df["High"].astype(float)
+    lows = df["Low"].astype(float)
+    swing_highs = []
+    swing_lows = []
+    for i in range(left, len(df) - right):
+        high_window = highs.iloc[i-left:i+right+1]
+        low_window = lows.iloc[i-left:i+right+1]
+        if highs.iloc[i] == high_window.max():
+            if (high_window == highs.iloc[i]).sum() == 1:
+                swing_highs.append((i, float(highs.iloc[i])))
+        if lows.iloc[i] == low_window.min():
+            if (low_window == lows.iloc[i]).sum() == 1:
+                swing_lows.append((i, float(lows.iloc[i])))
+    return swing_highs, swing_lows
 
 def get_news_ai(sym):
     try:
@@ -81,105 +114,131 @@ def get_news_ai(sym):
         print(f"NEWS ERR {e}")
         return [], "⚪ NEWS UNKNOWN", "News unavailable", False, ""
 
-# --- NEW: CALCULATE SL / TP ---
-def calc_sltp(df, sig, entry):
-    # Use recent swing for SMC SL
-    swing_low = float(df["Low"].tail(20).min())
-    swing_high = float(df["High"].tail(20).max())
-    # For XAUUSD / BTC need bigger buffer, for Forex smaller
-    # Use ATR-like buffer = 0.15% of price
-    buffer = entry * 0.0015
+# --- NEW TIGHT SL / TP - USES REAL SWING ---
+def calc_sltp(sym, sig, entry, swing_low, swing_high):
+    if sym == "XAUUSD":
+        buffer = 3.0
+    elif sym == "BTCUSD":
+        buffer = 80.0
+    elif sym == "USDJPY":
+        buffer = 0.08
+    else:
+        buffer = entry * 0.0003
 
     if sig == "BUY":
         sl = swing_low - buffer
-        # If SL too far (more than 1.5% away), cap it
-        if entry - sl > entry * 0.015:
-            sl = entry - (entry * 0.008)
+        # Safety cap: max risk 1.2% - if swing too far, use tighter SL
+        if entry - sl > entry * 0.012:
+            sl = entry - (entry * 0.006)
         risk = entry - sl
         tp1 = entry + risk * 1.5
         tp2 = entry + risk * 2.5
         tp3 = entry + risk * 4.0
-        sl_reason = f"SL below sweep low {swing_low:.2f} - if price goes below there, idea is wrong"
-    else: # SELL
+        sl_reason = f"SL below swept swing low {swing_low:.2f} + buffer - if price closes below, idea invalid"
+    else:
         sl = swing_high + buffer
-        if sl - entry > entry * 0.015:
-            sl = entry + (entry * 0.008)
+        if sl - entry > entry * 0.012:
+            sl = entry + (entry * 0.006)
         risk = sl - entry
         tp1 = entry - risk * 1.5
         tp2 = entry - risk * 2.5
         tp3 = entry - risk * 4.0
-        sl_reason = f"SL above sweep high {swing_high:.2f} - if price goes above there, idea is wrong"
-
+        sl_reason = f"SL above swept swing high {swing_high:.2f} + buffer - if price closes above, idea invalid"
     return sl, tp1, tp2, tp3, sl_reason, risk
 
+# ==========================================
+# IMPROVED SMC ANALYSIS 2.0
+# ==========================================
 def analyze(df):
     try:
-        close = df["Close"]
-        last = df.iloc[-1]
-        prev20 = df.iloc[:-1]
-        hh = float(prev20["High"].max())
-        ll = float(prev20["Low"].min())
-        trend = "UPTREND" if float(close.tail(20).iloc[-1]) > float(close.tail(20).iloc[0]) else "DOWNTREND" if float(close.tail(20).iloc[-1]) < float(close.tail(20).iloc[0]) else "RANGING"
-        swept_low = float(prev20["Low"].min()) > float(df["Low"].iloc[-2]) and float(last["Close"]) > float(prev20["Low"].min())
-        swept_high = float(prev20["High"].max()) < float(df["High"].iloc[-2]) and float(last["Close"]) < float(prev20["High"].max())
-        liquidity = "SWEPT LOW" if swept_low else "SWEPT HIGH" if swept_high else "NO SWEEP"
-        bos = "BULLISH BOS" if float(last["Close"]) > hh else "BEARISH BOS" if float(last["Close"]) < ll else "NO BOS"
-        fvg = "BULLISH FVG" if float(df["Low"].iloc[-1]) > float(df["High"].iloc[-3]) else "BEARISH FVG" if float(df["High"].iloc[-1]) < float(df["Low"].iloc[-3]) else "NO FVG"
-        reasons, no_reasons = [], []
-        if trend == "UPTREND":
-            reasons.append("✅ Trend UPTREND")
-            if liquidity=="SWEPT LOW": reasons.append("✅ Liquidity swept lows")
-            else: no_reasons.append("❌ No sweep of lows yet")
-            if bos=="BULLISH BOS": reasons.append(f"✅ BOS broke {hh:.2f}")
-            else: no_reasons.append(f"❌ No BOS above {hh:.2f}")
-            if fvg=="BULLISH FVG": reasons.append("✅ Bullish FVG")
-            else: no_reasons.append("❌ No Bullish FVG")
-            if len(reasons)>=3: return "BUY", reasons, no_reasons, trend, liquidity, bos, fvg, last
-            return None, reasons, no_reasons, trend, liquidity, bos, fvg, last
-        elif trend == "DOWNTREND":
-            reasons.append("✅ Trend DOWNTREND")
-            if liquidity=="SWEPT HIGH": reasons.append("✅ Liquidity swept highs")
-            else: no_reasons.append("❌ No sweep of highs yet")
-            if bos=="BEARISH BOS": reasons.append(f"✅ BOS broke {ll:.2f}")
-            else: no_reasons.append(f"❌ No BOS below {ll:.2f}")
-            if fvg=="BEARISH FVG": reasons.append("✅ Bearish FVG")
-            else: no_reasons.append("❌ No Bearish FVG")
-            if len(reasons)>=3: return "SELL", reasons, no_reasons, trend, liquidity, bos, fvg, last
-            return None, reasons, no_reasons, trend, liquidity, bos, fvg, last
+        if df is None or len(df) < 60:
+            raise ValueError("Not enough candles")
+        data = df.iloc[:-1].copy()
+        if len(data) < 55:
+            raise ValueError("Not enough completed candles")
+        close = data["Close"].astype(float)
+        last = data.iloc[-1]
+        ema20 = close.ewm(span=20, adjust=False).mean().iloc[-1]
+        ema50 = close.ewm(span=50, adjust=False).mean().iloc[-1]
+        if ema20 > ema50 and float(last["Close"]) > ema20:
+            trend = "UPTREND"
+        elif ema20 < ema50 and float(last["Close"]) < ema20:
+            trend = "DOWNTREND"
         else:
-            no_reasons.append("❌ RANGING - no trend")
-            return None, reasons, no_reasons, trend, liquidity, bos, fvg, last
+            trend = "RANGING"
+        swing_highs, swing_lows = find_swings(data)
+        if not swing_highs or not swing_lows:
+            raise ValueError("No confirmed swing points")
+        swing_high = swing_highs[-1][1]
+        swing_low = swing_lows[-1][1]
+        candle = data.iloc[-1]
+        third = data.iloc[-3]
+        candle_close = float(candle["Close"])
+        candle_low = float(candle["Low"])
+        candle_high = float(candle["High"])
+        swept_low = (candle_low < swing_low and candle_close > swing_low)
+        swept_high = (candle_high > swing_high and candle_close < swing_high)
+        liquidity = "SWEPT LOW" if swept_low else "SWEPT HIGH" if swept_high else "NO SWEEP"
+        if candle_close > swing_high:
+            bos = "BULLISH BOS"
+        elif candle_close < swing_low:
+            bos = "BEARISH BOS"
+        else:
+            bos = "NO BOS"
+        bullish_fvg = (float(candle["Low"]) > float(third["High"]))
+        bearish_fvg = (float(candle["High"]) < float(third["Low"]))
+        fvg = "BULLISH FVG" if bullish_fvg else "BEARISH FVG" if bearish_fvg else "NO FVG"
+        reasons = []
+        no_reasons = []
+        if trend == "UPTREND":
+            reasons.append("✅ Trend: UPTREND (EMA20 > EMA50)")
+            if swept_low: reasons.append(f"✅ Liquidity swept below swing low {swing_low:.2f}")
+            else: no_reasons.append("❌ No confirmed sweep of lows")
+            if bos == "BULLISH BOS": reasons.append(f"✅ Bullish BOS above {swing_high:.2f}")
+            else: no_reasons.append("❌ No bullish BOS")
+            if bullish_fvg: reasons.append("✅ Bullish FVG detected")
+            else: no_reasons.append("❌ No bullish FVG")
+            if swept_low and bos == "BULLISH BOS" and bullish_fvg:
+                return ("BUY", reasons, no_reasons, trend, liquidity, bos, fvg, last, swing_high, swing_low)
+        elif trend == "DOWNTREND":
+            reasons.append("✅ Trend: DOWNTREND (EMA20 < EMA50)")
+            if swept_high: reasons.append(f"✅ Liquidity swept above swing high {swing_high:.2f}")
+            else: no_reasons.append("❌ No confirmed sweep of highs")
+            if bos == "BEARISH BOS": reasons.append(f"✅ Bearish BOS below {swing_low:.2f}")
+            else: no_reasons.append("❌ No bearish BOS")
+            if bearish_fvg: reasons.append("✅ Bearish FVG detected")
+            else: no_reasons.append("❌ No bearish FVG")
+            if swept_high and bos == "BEARISH BOS" and bearish_fvg:
+                return ("SELL", reasons, no_reasons, trend, liquidity, bos, fvg, last, swing_high, swing_low)
+        else:
+            no_reasons.append("❌ Market is RANGING - EMA flat")
+        return (None, reasons, no_reasons, trend, liquidity, bos, fvg, last, swing_high, swing_low)
     except Exception as e:
-        print(f"ANALYZE ERR {e}")
-        return None, [], ["❌ Analysis error"], "UNKNOWN", "UNKNOWN", "UNKNOWN", "UNKNOWN", df.iloc[-1]
+        print(f"ANALYZE ERR: {e}")
+        return (None, [], ["❌ Analysis error"], "UNKNOWN", "UNKNOWN", "UNKNOWN", "UNKNOWN", df.iloc[-1], 0, 0)
 
-def format_full(sym, tf, sig, reasons, no_reasons, trend, liq, bos, fvg, last, news_data, df):
+def format_full(sym, tf, sig, reasons, no_reasons, trend, liq, bos, fvg, last, news_data, df, swing_high, swing_low):
     headlines, bias, bias_text, high_impact, impact_reason = news_data
     price = float(last["Close"])
-    # Decimals - Gold/BTC 2 decimals, Forex 5 decimals
     dec = 2 if sym in ["XAUUSD","BTCUSD"] else 5
-    msg = f"🤖 *AI SMC + NEWS - {sym} {tf}*\n\nPrice: {price:.{dec}f}\n\n*📰 NEWS:*\n{bias}\n{bias_text}\n"
+    if sym == "USDJPY":
+        dec = 3
+    msg = f"🤖 *AI SMC 2.0 + NEWS - {sym} {tf}*\n\nPrice: {price:.{dec}f}\n\n*📰 NEWS:*\n{bias}\n{bias_text}\n"
     if high_impact: msg += f"\n{impact_reason}\n"
     if headlines: msg += "\n" + "\n".join(headlines[:4]) + "\n\n"
-    msg += f"*📊 TECHNICAL:*\nTrend: {trend} | Liq: {liq} | {bos} | {fvg}\n\n"
+    msg += f"*📊 TECHNICAL:*\nTrend: {trend} | Liq: {liq} | {bos} | {fvg}\nSwing High: {swing_high:.{dec}f} | Swing Low: {swing_low:.{dec}f}\n\n"
     if high_impact:
         msg += "🚫 *NO TRADE* - High impact news. Wait after news.\n"
         return msg
     if sig:
-        sl, tp1, tp2, tp3, sl_reason, risk = calc_sltp(df, sig, price)
+        sl, tp1, tp2, tp3, sl_reason, risk = calc_sltp(sym, sig, price, swing_low, swing_high)
         emoji = "🟢" if sig=="BUY" else "🔴"
         msg += f"{emoji} *SIGNAL: {sig}*\n*WHY SETUP:*\n" + "\n".join(reasons) + "\n\n"
-        msg += f"*🎯 TRADE PLAN:*\n"
-        msg += f"Entry: {price:.{dec}f}\n"
-        msg += f"Stop Loss: {sl:.{dec}f}\n"
-        msg += f"TP1 (1:1.5 - Take 50%): {tp1:.{dec}f}\n"
-        msg += f"TP2 (1:2.5 - Take 30%): {tp2:.{dec}f}\n"
-        msg += f"TP3 (1:4 - Runner): {tp3:.{dec}f}\n\n"
+        msg += f"*🎯 TRADE PLAN:*\nEntry: {price:.{dec}f}\nStop Loss: {sl:.{dec}f}\nTP1 (1:1.5 - Take 50%): {tp1:.{dec}f}\nTP2 (1:2.5 - Take 30%): {tp2:.{dec}f}\nTP3 (1:4 - Runner 20%): {tp3:.{dec}f}\n\n"
         msg += f"*Why this SL:* {sl_reason}\n"
         msg += f"*Why these TPs:* TP1 = first liquidity, TP2 = next OB, TP3 = major high/low\n"
         msg += f"Risk: {risk:.{dec}f} | Risk:Reward up to 1:4\n"
         msg += f"💡 *Tip:* Move SL to breakeven after TP1 hits."
-        # News conflict warning
         if sig=="BUY" and "BEARISH" in bias: msg += "\n\n⚠️ Chart BUY but News BEARISH - use small lot."
         if sig=="SELL" and "BULLISH" in bias: msg += "\n\n⚠️ Chart SELL but News BULLISH - use small lot."
     else:
@@ -196,9 +255,9 @@ def auto_scanner():
                 for tf in TFS:
                     df=get_data(SYMBOLS[sym], tf)
                     if df is None: continue
-                    sig,reasons,no_reasons,trend,liq,bos,fvg,last = analyze(df)
+                    sig,reasons,no_reasons,trend,liq,bos,fvg,last,sh,slw = analyze(df)
                     if sig:
-                        send(format_full(sym, tf, sig, reasons, no_reasons, trend, liq, bos, fvg, last, news_data, df))
+                        send(format_full(sym, tf, sig, reasons, no_reasons, trend, liq, bos, fvg, last, news_data, df, sh, slw))
                         time.sleep(1)
             time.sleep(900)
         except Exception as e:
@@ -218,7 +277,7 @@ def webhook():
         text = msg.get("text","").strip()
         cid = msg.get("chat",{}).get("id")
         if text.lower()=="/start":
-            send("🤖 *SMC AI + NEWS + SLTP LIVE!*\n\nTry `/signal XAUUSD`\nTry `/news XAUUSD`", cid)
+            send("🤖 *SMC AI 2.0 + NEWS + SLTP LIVE!*\n\nTry `/signal XAUUSD`\nTry `/news XAUUSD`", cid)
         elif text.lower().startswith("/news"):
             sym = text.split()[-1].upper() if len(text.split())>1 else "XAUUSD"
             if sym in SYMBOLS:
@@ -233,8 +292,8 @@ def webhook():
                 for tf in TFS:
                     df=get_data(SYMBOLS[sym], tf)
                     if df is None: continue
-                    sig,reasons,no_reasons,trend,liq,bos,fvg,last = analyze(df)
-                    send(format_full(sym, tf, sig, reasons, no_reasons, trend, liq, bos, fvg, last, news_data, df), cid)
+                    sig,reasons,no_reasons,trend,liq,bos,fvg,last,sh,slw = analyze(df)
+                    send(format_full(sym, tf, sig, reasons, no_reasons, trend, liq, bos, fvg, last, news_data, df, sh, slw), cid)
         return "ok"
     except Exception as e:
         print(e); return "ok"
